@@ -25,6 +25,8 @@ async function api(method, path, body = null) {
     headers: { 'Content-Type': 'application/json' },
     credentials: 'include'
   };
+  const token = localStorage.getItem('arena_token');
+  if (token) opts.headers['Authorization'] = 'Bearer ' + token;
   if (body) opts.body = JSON.stringify(body);
   const res = await fetch(path, opts);
   const data = await res.json().catch(() => ({}));
@@ -101,6 +103,7 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
 
   try {
     const data = await api('POST', '/api/login', { username, password });
+    if (data.token) localStorage.setItem('arena_token', data.token);
     State.authenticated = true;
     State.username = data.username;
     showApp();
@@ -117,6 +120,7 @@ async function logout() {
   try {
     await api('POST', '/api/logout');
   } catch {}
+  localStorage.removeItem('arena_token');
   State.authenticated = false;
   showLogin();
   showToast('Sessão encerrada com sucesso', 'info');

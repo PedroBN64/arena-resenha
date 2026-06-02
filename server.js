@@ -127,8 +127,16 @@ app.get('/api/diagnostico', async (req, res) => {
 });
 
 // Middleware de autenticação com JWT
+function getToken(req) {
+  // Tentar cookie primeiro, depois Authorization header
+  if (req.cookies && req.cookies.token) return req.cookies.token;
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) return authHeader.substring(7);
+  return null;
+}
+
 function requireAuth(req, res, next) {
-  const token = req.cookies.token;
+  const token = getToken(req);
   if (!token) return res.status(401).json({ error: 'Não autorizado. Faça login.' });
 
   try {
@@ -195,9 +203,9 @@ app.post('/api/login', async (req, res) => {
     }
 
     const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '24h' });
-    res.cookie('token', token, { httpOnly: true, secure: true, sameSite: 'lax', maxAge: 24 * 60 * 60 * 1000 });
+    res.cookie('token', token, { httpOnly: true, secure: true, sameSite: 'lax', path: '/', maxAge: 24 * 60 * 60 * 1000 });
     
-    res.json({ success: true, username: user.username });
+    res.json({ success: true, username: user.username, token });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -209,7 +217,7 @@ app.post('/api/logout', (req, res) => {
 });
 
 app.get('/api/auth/check', (req, res) => {
-  const token = req.cookies.token;
+  const token = getToken(req);
   if (!token) return res.json({ authenticated: false });
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
