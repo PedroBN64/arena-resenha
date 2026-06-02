@@ -98,7 +98,7 @@ app.post('/api/login', async (req, res) => {
     }
 
     const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '24h' });
-    res.cookie('token', token, { httpOnly: true, secure: process.env.NODE_ENV === 'production', maxAge: 24 * 60 * 60 * 1000 });
+    res.cookie('token', token, { httpOnly: true, secure: true, sameSite: 'lax', maxAge: 24 * 60 * 60 * 1000 });
     
     res.json({ success: true, username: user.username });
   } catch (err) {
@@ -171,32 +171,40 @@ app.put('/api/horarios/:id', requireAuth, async (req, res) => {
   const { status_pagamento, nome_time, nome_responsavel, cpf, telefone, endereco, observacoes } = req.body;
 
   try {
-    const { data: horarioAtual } = await supabase.from('horarios').select('time_id').eq('id', id).single();
+    const { data: horarioAtual, error: fetchErr } = await supabase.from('horarios').select('time_id').eq('id', id).single();
+    if (fetchErr) throw fetchErr;
     
     if (nome_time && nome_responsavel) {
       let timeId = horarioAtual.time_id;
       if (timeId) {
-        await supabase.from('times').update({ nome_time, nome_responsavel, cpf, telefone, endereco, observacoes }).eq('id', timeId);
+        const { error: updateErr } = await supabase.from('times').update({ nome_time, nome_responsavel, cpf: cpf || '', telefone: telefone || '', endereco: endereco || '', observacoes: observacoes || '' }).eq('id', timeId);
+        if (updateErr) throw updateErr;
       } else {
-        const { data: newTime } = await supabase.from('times').insert([{ nome_time, nome_responsavel, cpf, telefone, endereco, observacoes }]).select('id').single();
+        const { data: newTime, error: insertErr } = await supabase.from('times').insert([{ nome_time, nome_responsavel, cpf: cpf || '', telefone: telefone || '', endereco: endereco || '', observacoes: observacoes || '' }]).select('id').single();
+        if (insertErr) throw insertErr;
         timeId = newTime.id;
       }
-      await supabase.from('horarios').update({ time_id: timeId, status_pagamento: status_pagamento || 'nao_pago', updated_at: new Date() }).eq('id', id);
+      const { error: horErr } = await supabase.from('horarios').update({ time_id: timeId, status_pagamento: status_pagamento || 'nao_pago', updated_at: new Date().toISOString() }).eq('id', id);
+      if (horErr) throw horErr;
     } else if (status_pagamento !== undefined) {
-      await supabase.from('horarios').update({ status_pagamento, updated_at: new Date() }).eq('id', id);
+      const { error: statusErr } = await supabase.from('horarios').update({ status_pagamento, updated_at: new Date().toISOString() }).eq('id', id);
+      if (statusErr) throw statusErr;
     }
     res.json({ success: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('PUT /api/horarios/:id error:', err);
+    res.status(500).json({ error: err.message || 'Erro ao salvar horário' });
   }
 });
 
 app.delete('/api/horarios/:id/liberar', requireAuth, async (req, res) => {
   const { id } = req.params;
   try {
-    await supabase.from('horarios').update({ time_id: null, status_pagamento: 'nao_pago', updated_at: new Date() }).eq('id', id);
+    const { error } = await supabase.from('horarios').update({ time_id: null, status_pagamento: 'nao_pago', updated_at: new Date().toISOString() }).eq('id', id);
+    if (error) throw error;
     res.json({ success: true });
   } catch (err) {
+    console.error('DELETE /api/horarios/:id/liberar error:', err);
     res.status(500).json({ error: err.message });
   }
 });
