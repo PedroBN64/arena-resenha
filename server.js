@@ -29,6 +29,55 @@ app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 app.use(express.static(__dirname));
 
+// ─── Diagnóstico (remover depois de resolver) ───────────────────────────────
+app.get('/api/diagnostico', async (req, res) => {
+  const resultado = {
+    env_url: supabaseUrl ? '✅ SUPABASE_URL definida (' + supabaseUrl.substring(0, 30) + '...)' : '❌ SUPABASE_URL NÃO DEFINIDA',
+    env_key: supabaseKey ? '✅ SUPABASE_KEY definida (' + supabaseKey.substring(0, 20) + '...)' : '❌ SUPABASE_KEY NÃO DEFINIDA',
+    env_jwt: JWT_SECRET ? '✅ JWT_SECRET definida' : '❌ JWT_SECRET NÃO DEFINIDA',
+    supabase_client: supabase ? '✅ Cliente Supabase criado' : '❌ Cliente Supabase NÃO criado',
+    teste_leitura: null,
+    teste_escrita: null,
+    teste_leitura_times: null
+  };
+
+  if (supabase) {
+    try {
+      const { data, error } = await supabase.from('horarios').select('id').limit(3);
+      resultado.teste_leitura = error ? '❌ ERRO: ' + JSON.stringify(error) : '✅ Leitura OK (' + (data ? data.length : 0) + ' registros)';
+    } catch (e) {
+      resultado.teste_leitura = '❌ EXCEÇÃO: ' + e.message;
+    }
+
+    try {
+      const { data, error } = await supabase.from('times').select('id, nome_time').limit(3);
+      resultado.teste_leitura_times = error ? '❌ ERRO: ' + JSON.stringify(error) : '✅ Leitura Times OK (' + JSON.stringify(data) + ')';
+    } catch (e) {
+      resultado.teste_leitura_times = '❌ EXCEÇÃO: ' + e.message;
+    }
+
+    try {
+      // Tentar inserir e deletar um registro de teste
+      const { data: inserted, error: insertErr } = await supabase.from('times').insert([{
+        nome_time: '__TESTE_DIAGNOSTICO__',
+        nome_responsavel: 'teste'
+      }]).select('id').single();
+      
+      if (insertErr) {
+        resultado.teste_escrita = '❌ INSERT FALHOU: ' + JSON.stringify(insertErr);
+      } else {
+        // Limpar o registro de teste
+        await supabase.from('times').delete().eq('id', inserted.id);
+        resultado.teste_escrita = '✅ Escrita OK (insert + delete funcionaram)';
+      }
+    } catch (e) {
+      resultado.teste_escrita = '❌ EXCEÇÃO NA ESCRITA: ' + e.message;
+    }
+  }
+
+  res.json(resultado);
+});
+
 // Middleware de autenticação com JWT
 function requireAuth(req, res, next) {
   const token = req.cookies.token;
