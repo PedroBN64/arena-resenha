@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
 <meta charset="UTF-8"/>
@@ -359,6 +359,7 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--t
     <button class="hamburger" onclick="toggleSb()"><i class="fa-solid fa-bars"></i></button>
     <div class="tb-title" id="tb-title">Dashboard</div>
     <div class="tb-actions">
+      <button class="btn-icon" onclick="manualRefresh()" title="Atualizar dados" id="btn-refresh"><i class="fa-solid fa-rotate"></i></button>
       <button class="btn-icon" onclick="exportBackup()" title="Backup"><i class="fa-solid fa-database"></i></button>
       <button class="btn-icon" onclick="logout()" title="Sair"><i class="fa-solid fa-right-from-bracket"></i></button>
     </div>
@@ -501,204 +502,266 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--t
 
 <script>
 /* ═══════════════════════════════════════════════
-   ARENA RESENHA — Standalone App (localStorage)
+   ARENA RESENHA — API-connected App (Supabase)
    ═══════════════════════════════════════════════ */
 'use strict';
 
-// ── Constantes ────────────────────────────────
 const DIAS = ['Segunda-feira','Terça-feira','Quarta-feira','Quinta-feira','Sexta-feira','Sábado','Domingo'];
 const SHORT = ['SEG','TER','QUA','QUI','SEX','SÁB','DOM'];
 const HRS = [{i:'18:00',f:'19:00'},{i:'19:00',f:'20:00'},{i:'20:00',f:'21:00'},{i:'21:00',f:'22:00'},{i:'22:00',f:'23:00'},{i:'23:00',f:'00:00'}];
-const CREDS = {admin:'admin123', gestor:'gestor2024'};
 
-// ── DB (localStorage) ─────────────────────────
-const DB = {
-  get(k){try{return JSON.parse(localStorage.getItem('ar_'+k))||null}catch{return null}},
-  set(k,v){localStorage.setItem('ar_'+k,JSON.stringify(v))},
-  del(k){localStorage.removeItem('ar_'+k)}
-};
+const S = { horarios:[], filt:'todos', rptData:[], selId:null, user:'' };
+let refreshTimer = null;
 
-// Estado
-const S = {
-  slots:{},   // key = "dia|horario" → {team,resp,cpf,tel,addr,obs,status,id,createdAt}
-  filt:'todos',
-  filtDay:'',
-  rptData:[],
-  selKey:null,
-  user:''
-};
-
-function slotKey(dia,hr){return `${dia}|${hr}`;}
-
-// ── Inicializar slots ─────────────────────────
-function initSlots(){
-  const saved = DB.get('slots');
-  if(saved){S.slots=saved;return;}
-  const slots={};
-  DIAS.forEach(d=>HRS.forEach(h=>{
-    const k=slotKey(d,h.i);
-    slots[k]={team:'',resp:'',cpf:'',tel:'',addr:'',obs:'',status:'nao_pago',occupied:false,createdAt:null};
-  }));
-  S.slots=slots;DB.set('slots',slots);
+// ── API Helper ────────────────────────────────
+async function api(method, path, body=null) {
+  const opts = { method, headers:{'Content-Type':'application/json'}, credentials:'include' };
+  const token = localStorage.getItem('arena_token');
+  if (token) opts.headers['Authorization'] = 'Bearer ' + token;
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(path, opts);
+  const data = await res.json().catch(()=>({}));
+  if (!res.ok) throw new Error(data.error || 'Erro ' + res.status);
+  return data;
 }
-
-function saveSlots(){DB.set('slots',S.slots);}
 
 // ── AUTH ──────────────────────────────────────
-function togglePw(){
-  const i=document.getElementById('lp'),ic=document.getElementById('eye-ic');
-  i.type=i.type==='password'?'text':'password';
-  ic.className=i.type==='text'?'fa-solid fa-eye-slash':'fa-solid fa-eye';
+function togglePw() {
+  const i=document.getElementById('lp'), ic=document.getElementById('eye-ic');
+  i.type = i.type==='password' ? 'text' : 'password';
+  ic.className = i.type==='text' ? 'fa-solid fa-eye-slash' : 'fa-solid fa-eye';
 }
 
-document.getElementById('login-form').addEventListener('submit',e=>{
+document.getElementById('login-form').addEventListener('submit', async e => {
   e.preventDefault();
   const u=document.getElementById('lu').value.trim();
   const p=document.getElementById('lp').value;
   const err=document.getElementById('login-err');
-  if(CREDS[u]===p){
-    S.user=u;err.classList.add('hidden');
-    document.getElementById('login-screen').classList.add('hidden');
-    document.getElementById('app').classList.remove('hidden');
-    document.getElementById('sb-user').textContent=u.charAt(0).toUpperCase()+u.slice(1);
-    init();
-  }else{
-    err.textContent='Usuário ou senha inválidos.';err.classList.remove('hidden');
+  const btn=document.getElementById('login-btn');
+  btn.disabled=true;
+  btn.innerHTML='<i class="fa-solid fa-spinner fa-spin"></i> Entrando...';
+  err.classList.add('hidden');
+  try {
+    const data = await api('POST', '/api/login', {username:u, password:p});
+    if (data.token) localStorage.setItem('arena_token', data.token);
+    S.user = data.username;
+    showApp();
+  } catch(ex) {
+    err.textContent = ex.message;
+    err.classList.remove('hidden');
+  } finally {
+    btn.disabled=false;
+    btn.innerHTML='<i class="fa-solid fa-right-to-bracket"></i> Entrar';
   }
 });
 
-function logout(){
+async function logout() {
+  try { await api('POST', '/api/logout'); } catch {}
+  localStorage.removeItem('arena_token');
+  stopAutoRefresh();
   document.getElementById('app').classList.add('hidden');
   document.getElementById('login-screen').classList.remove('hidden');
-  document.getElementById('lu').value='';document.getElementById('lp').value='';
+  document.getElementById('lu').value='';
+  document.getElementById('lp').value='';
   toast('Sessão encerrada','inf');
 }
 
-// ── INIT ──────────────────────────────────────
-function init(){initSlots();renderAgenda();updateDash();goto('dashboard',document.querySelector('[onclick*="dashboard"]'));}
+function showApp() {
+  document.getElementById('login-screen').classList.add('hidden');
+  document.getElementById('app').classList.remove('hidden');
+  document.getElementById('sb-user').textContent = S.user || 'Admin';
+  init();
+}
+
+async function checkAuth() {
+  try {
+    const data = await api('GET', '/api/auth/check');
+    if (data.authenticated) { S.user=data.username; showApp(); }
+  } catch {}
+}
+
+// ── INIT & AUTO-REFRESH ───────────────────────
+async function init() {
+  await loadHorarios();
+  renderAgenda();
+  await updateDash();
+  goto('dashboard', document.querySelector('[onclick*="dashboard"]'));
+  startAutoRefresh();
+}
+
+function startAutoRefresh() {
+  stopAutoRefresh();
+  refreshTimer = setInterval(async () => {
+    await loadHorarios();
+    renderAgenda();
+    await updateDash();
+  }, 30000);
+}
+
+function stopAutoRefresh() {
+  if (refreshTimer) { clearInterval(refreshTimer); refreshTimer=null; }
+}
+
+async function manualRefresh() {
+  const btn = document.getElementById('btn-refresh');
+  btn.innerHTML = '<i class="fa-solid fa-rotate fa-spin"></i>';
+  btn.disabled = true;
+  try {
+    await loadHorarios(); renderAgenda(); await updateDash();
+    toast('Dados atualizados!','inf');
+  } catch { toast('Erro ao atualizar','er'); }
+  finally { btn.innerHTML='<i class="fa-solid fa-rotate"></i>'; btn.disabled=false; }
+}
+
+// ── DADOS ─────────────────────────────────────
+async function loadHorarios() {
+  try { S.horarios = await api('GET', '/api/horarios'); }
+  catch(err) { console.error('Erro ao carregar horários:', err); }
+}
+
+function getHorario(dia, hr) {
+  return S.horarios.find(h => h.dia_semana===dia && h.horario_inicio===hr);
+}
 
 // ── NAV ───────────────────────────────────────
-const TITLES={dashboard:'Dashboard',agenda:'Agenda de Horários',historico:'Histórico',relatorios:'Relatórios'};
-function goto(pg,el){
+const TITLES = {dashboard:'Dashboard',agenda:'Agenda de Horários',historico:'Histórico',relatorios:'Relatórios'};
+
+function goto(pg, el) {
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
   document.getElementById('page-'+pg).classList.add('active');
-  if(el)el.classList.add('active');
-  document.getElementById('tb-title').textContent=TITLES[pg]||pg;
-  if(window.innerWidth<=900&&document.getElementById('sidebar').classList.contains('open'))toggleSb();
-  if(pg==='historico')renderHist();
+  if (el) el.classList.add('active');
+  document.getElementById('tb-title').textContent = TITLES[pg]||pg;
+  if (window.innerWidth<=900 && document.getElementById('sidebar').classList.contains('open')) toggleSb();
+  if (pg==='historico') renderHist();
 }
 
-function toggleSb(){
+function toggleSb() {
   document.getElementById('sidebar').classList.toggle('open');
   document.getElementById('sb-ov').classList.toggle('active');
 }
 
 // ── DASHBOARD ────────────────────────────────
-function updateDash(){
-  const keys=Object.keys(S.slots);
-  const total=keys.length;
-  const ocu=keys.filter(k=>S.slots[k].occupied).length;
-  const disp=total-ocu;
-  const pg=keys.filter(k=>S.slots[k].occupied&&S.slots[k].status==='pago').length;
-  const np=keys.filter(k=>S.slots[k].occupied&&S.slots[k].status==='nao_pago').length;
-  animN('sv-total',total);animN('sv-ocu',ocu);animN('sv-disp',disp);animN('sv-pg',pg);animN('sv-np',np);
-  const pct=total>0?Math.round((ocu/total)*100):0;
-  document.getElementById('occ-pct').textContent=pct+'%';
-  setTimeout(()=>document.getElementById('prog-bar').style.width=pct+'%',200);
-  renderDaySum();
+async function updateDash() {
+  try {
+    const d = await api('GET', '/api/dashboard');
+    animN('sv-total',d.total); animN('sv-ocu',d.ocupados); animN('sv-disp',d.disponiveis);
+    animN('sv-pg',d.pagos); animN('sv-np',d.nao_pagos);
+    const pct = d.total>0 ? Math.round((d.ocupados/d.total)*100) : 0;
+    document.getElementById('occ-pct').textContent = pct+'%';
+    setTimeout(()=>document.getElementById('prog-bar').style.width=pct+'%', 200);
+    renderDaySum();
+  } catch(err) { console.error('Erro dashboard:', err); }
 }
 
-function animN(id,val){
-  const el=document.getElementById(id);if(!el)return;
-  const start=performance.now(),from=parseInt(el.textContent)||0,dur=700;
+function animN(id, val) {
+  const el=document.getElementById(id); if (!el) return;
+  const start=performance.now(), from=parseInt(el.textContent)||0, dur=700;
   const up=now=>{const p=Math.min((now-start)/dur,1),e=1-Math.pow(1-p,3);el.textContent=Math.round(from+(val-from)*e);if(p<1)requestAnimationFrame(up);};
   requestAnimationFrame(up);
 }
 
-function renderDaySum(){
-  const el=document.getElementById('days-sum');if(!el)return;
-  el.innerHTML=DIAS.map((d,i)=>{
-    const slots=HRS.map(h=>S.slots[slotKey(d,h.i)]).filter(Boolean);
-    const ocu=slots.filter(s=>s.occupied).length;
+function renderDaySum() {
+  const el=document.getElementById('days-sum'); if (!el) return;
+  el.innerHTML = DIAS.map((d,i)=>{
+    const slots = S.horarios.filter(h=>h.dia_semana===d);
+    const ocu = slots.filter(h=>h.time_id).length;
     return `<div class="day-sum"><span class="day-nm">${SHORT[i]}</span><span class="day-occ">${ocu}</span><span class="day-tot">de ${slots.length}</span></div>`;
   }).join('');
 }
 
 // ── AGENDA ───────────────────────────────────
-function renderAgenda(){
-  const el=document.getElementById('sch-grid');if(!el)return;
-  el.innerHTML=DIAS.map((d,di)=>`
-    <div class="sch-col">
-      <div class="day-hdr">${d.replace('-feira','')}<br><small style="font-size:.65rem;opacity:.7">${d.includes('feira')?'FEIRA':''}</small></div>
-      ${HRS.map(h=>{
-        const k=slotKey(d,h.i),s=S.slots[k];
-        if(!s)return'';
-        let cls='av',ico='<i class="fa-solid fa-plus slot-ic" style="color:var(--txt3)"></i>',team='',st='';
-        if(s.occupied){
-          if(s.status==='pago'){cls='pd';ico='<i class="fa-solid fa-circle-check slot-ic" style="color:var(--green)"></i>';}
-          else{cls='up';ico='<i class="fa-solid fa-triangle-exclamation slot-ic" style="color:var(--red)"></i>';}
-          team=`<span class="slot-team">${esc(s.team)}</span>`;
-          st=`<span class="slot-st ${cls==='pd'?'st-pd':'st-up'}">${cls==='pd'?'✅ Pago':'🔴 Não Pago'}</span>`;
-        }else st='<span class="slot-st st-av">Disponível</span>';
-        return `<div class="slot ${cls}" onclick="openModal('${k.replace(/'/g,"\\'")}')">
-          ${ico}<span class="slot-time">${h.i} – ${h.f}</span>${team}${st}</div>`;
-      }).join('')}
-    </div>`).join('');
+function renderAgenda() {
+  const el=document.getElementById('sch-grid'); if (!el) return;
+  el.innerHTML = DIAS.map(d=>{
+    const cols = HRS.map(h=>{
+      const hor=getHorario(d,h.i);
+      if (!hor) return '';
+      let cls='av', ico='<i class="fa-solid fa-plus slot-ic" style="color:var(--txt3)"></i>', team='', st='';
+      if (hor.time_id) {
+        if (hor.status_pagamento==='pago') { cls='pd'; ico='<i class="fa-solid fa-circle-check slot-ic" style="color:var(--green)"></i>'; }
+        else { cls='up'; ico='<i class="fa-solid fa-triangle-exclamation slot-ic" style="color:var(--red)"></i>'; }
+        team = `<span class="slot-team">${esc(hor.nome_time||'')}</span>`;
+        st = `<span class="slot-st ${cls==='pd'?'st-pd':'st-up'}">${cls==='pd'?'✅ Pago':'🔴 Não Pago'}</span>`;
+      } else {
+        st = '<span class="slot-st st-av">Disponível</span>';
+      }
+      return `<div class="slot ${cls}" onclick="openModal(${hor.id})">${ico}<span class="slot-time">${h.i} – ${h.f}</span>${team}${st}</div>`;
+    }).join('');
+    const label = d.replace('-feira','');
+    const sub = d.includes('feira') ? 'FEIRA' : '';
+    return `<div class="sch-col"><div class="day-hdr">${label}<br><small style="font-size:.65rem;opacity:.7">${sub}</small></div>${cols}</div>`;
+  }).join('');
 }
 
 // ── MODAL ────────────────────────────────────
-function openModal(key){
-  S.selKey=key;
-  const [dia,hr]=key.split('|');
-  const hObj=HRS.find(h=>h.i===hr)||{i:hr,f:''};
-  const s=S.slots[key]||{};
-  document.getElementById('modal-ttl').innerHTML=`<i class="fa-solid fa-futbol gold"></i> ${s.occupied?'Editar Horário':'Cadastrar Time'}`;
-  document.getElementById('modal-sub').textContent=`${dia} · ${hObj.i} às ${hObj.f}`;
-  document.getElementById('f-slot-key').value=key;
-  document.getElementById('f-team').value=s.team||'';
-  document.getElementById('f-resp').value=s.resp||'';
-  document.getElementById('f-cpf').value=s.cpf||'';
-  document.getElementById('f-tel').value=s.tel||'';
-  document.getElementById('f-addr').value=s.addr||'';
-  document.getElementById('f-obs').value=s.obs||'';
-  setSt(s.status||'nao_pago',false);
-  document.getElementById('btn-lib').style.display=s.occupied?'flex':'none';
+function openModal(horarioId) {
+  const hor = S.horarios.find(h=>h.id===horarioId);
+  if (!hor) return;
+  S.selId = horarioId;
+  const hObj = HRS.find(h=>h.i===hor.horario_inicio)||{i:hor.horario_inicio,f:''};
+  document.getElementById('modal-ttl').innerHTML = `<i class="fa-solid fa-futbol gold"></i> ${hor.time_id?'Editar Horário':'Cadastrar Time'}`;
+  document.getElementById('modal-sub').textContent = `${hor.dia_semana} · ${hObj.i} às ${hObj.f}`;
+  document.getElementById('f-slot-key').value = horarioId;
+  document.getElementById('f-team').value = hor.nome_time||'';
+  document.getElementById('f-resp').value = hor.nome_responsavel||'';
+  document.getElementById('f-cpf').value = hor.cpf||'';
+  document.getElementById('f-tel').value = hor.telefone||'';
+  document.getElementById('f-addr').value = hor.endereco||'';
+  document.getElementById('f-obs').value = hor.observacoes||'';
+  setSt(hor.status_pagamento||'nao_pago', false);
+  document.getElementById('btn-lib').style.display = hor.time_id ? 'flex' : 'none';
   document.getElementById('modal-ov').classList.add('active');
-  setTimeout(()=>document.getElementById('f-team').focus(),100);
+  setTimeout(()=>document.getElementById('f-team').focus(), 100);
 }
 
-function closeModal(){document.getElementById('modal-ov').classList.remove('active');document.getElementById('time-form').reset();S.selKey=null;}
-function closeModalOv(e){if(e.target===document.getElementById('modal-ov'))closeModal();}
+function closeModal() { document.getElementById('modal-ov').classList.remove('active'); document.getElementById('time-form').reset(); S.selId=null; }
+function closeModalOv(e) { if (e.target===document.getElementById('modal-ov')) closeModal(); }
 
-function setSt(st,upd=true){
-  const pb=document.getElementById('pay-bar'),bpd=document.getElementById('btn-pd'),bnp=document.getElementById('btn-np');
-  const ic=document.getElementById('pay-ic'),txt=document.getElementById('pay-txt');
-  bpd.classList.toggle('act',st==='pago');bnp.classList.toggle('act',st==='nao_pago');
-  pb.classList.toggle('pd-st',st==='pago');pb.classList.toggle('up-st',st==='nao_pago');
-  if(st==='pago'){ic.style.color='var(--green)';txt.textContent='✅ Pagamento em Dia';txt.style.color='var(--green)';}
-  else{ic.style.color='var(--red)';txt.textContent='🔴 Pagamento Pendente';txt.style.color='var(--red)';}
-  document.getElementById('f-st').value=st;
+function setSt(st, upd=true) {
+  const pb=document.getElementById('pay-bar'), bpd=document.getElementById('btn-pd'), bnp=document.getElementById('btn-np');
+  const ic=document.getElementById('pay-ic'), txt=document.getElementById('pay-txt');
+  bpd.classList.toggle('act',st==='pago'); bnp.classList.toggle('act',st==='nao_pago');
+  pb.classList.toggle('pd-st',st==='pago'); pb.classList.toggle('up-st',st==='nao_pago');
+  if (st==='pago') { ic.style.color='var(--green)'; txt.textContent='✅ Pagamento em Dia'; txt.style.color='var(--green)'; }
+  else { ic.style.color='var(--red)'; txt.textContent='🔴 Pagamento Pendente'; txt.style.color='var(--red)'; }
+  document.getElementById('f-st').value = st;
 }
 
-function saveSlot(e){
+async function saveSlot(e) {
   e.preventDefault();
-  const key=document.getElementById('f-slot-key').value;
-  const team=document.getElementById('f-team').value.trim();
-  const resp=document.getElementById('f-resp').value.trim();
-  if(!team||!resp){toast('Nome do time e responsável são obrigatórios','er');return;}
-  const s=S.slots[key]||{};
-  S.slots[key]={...s,team,resp,cpf:document.getElementById('f-cpf').value.trim(),tel:document.getElementById('f-tel').value.trim(),addr:document.getElementById('f-addr').value.trim(),obs:document.getElementById('f-obs').value.trim(),status:document.getElementById('f-st').value,occupied:true,createdAt:s.createdAt||new Date().toISOString()};
-  saveSlots();renderAgenda();updateDash();closeModal();
-  toast(`Time "${team}" salvo com sucesso! ⚽`,'ok');
+  const id = parseInt(document.getElementById('f-slot-key').value);
+  const team = document.getElementById('f-team').value.trim();
+  const resp = document.getElementById('f-resp').value.trim();
+  if (!team||!resp) { toast('Nome do time e responsável são obrigatórios','er'); return; }
+  const btn = e.target.querySelector('[type="submit"]');
+  btn.disabled=true; btn.innerHTML='<i class="fa-solid fa-spinner fa-spin"></i> Salvando...';
+  try {
+    await api('PUT', `/api/horarios/${id}`, {
+      nome_time:team, nome_responsavel:resp,
+      cpf:document.getElementById('f-cpf').value.trim(),
+      telefone:document.getElementById('f-tel').value.trim(),
+      endereco:document.getElementById('f-addr').value.trim(),
+      observacoes:document.getElementById('f-obs').value.trim(),
+      status_pagamento:document.getElementById('f-st').value
+    });
+    await loadHorarios(); renderAgenda(); await updateDash();
+    closeModal();
+    toast(`Time "${team}" salvo com sucesso! ⚽`,'ok');
+  } catch(err) { toast(err.message,'er'); }
+  finally { btn.disabled=false; btn.innerHTML='<i class="fa-solid fa-floppy-disk"></i> Salvar'; }
 }
 
-function freeSlot(){
-  const key=S.selKey;if(!key)return;
-  const s=S.slots[key];
-  if(!confirm(`Liberar o horário de "${s.team||'este time'}"?\n\nO horário ficará disponível novamente.`))return;
-  S.slots[key]={...s,team:'',resp:'',cpf:'',tel:'',addr:'',obs:'',status:'nao_pago',occupied:false,createdAt:null};
-  saveSlots();renderAgenda();updateDash();closeModal();toast('Horário liberado com sucesso!','inf');
+async function freeSlot() {
+  const id=S.selId; if (!id) return;
+  const hor=S.horarios.find(h=>h.id===id);
+  const nome = hor&&hor.nome_time ? hor.nome_time : 'este time';
+  if (!confirm(`Liberar o horário de "${nome}"?\n\nO horário ficará disponível novamente.`)) return;
+  try {
+    await api('DELETE', `/api/horarios/${id}/liberar`);
+    await loadHorarios(); renderAgenda(); await updateDash();
+    closeModal(); toast('Horário liberado com sucesso!','inf');
+  } catch(err) { toast(err.message,'er'); }
 }
 
 // ── HISTÓRICO ─────────────────────────────────
@@ -706,79 +769,63 @@ let dbt;
 function filterHist(){clearTimeout(dbt);dbt=setTimeout(renderHist,250);}
 function setFilt(f,el){S.filt=f;document.querySelectorAll('.fbtn').forEach(b=>b.classList.remove('active'));if(el)el.classList.add('active');renderHist();}
 
-function renderHist(){
+async function renderHist() {
   const q=(document.getElementById('srch')?.value||'').toLowerCase();
   const dayFil=document.getElementById('day-filt')?.value||'';
-  const el=document.getElementById('times-list');if(!el)return;
-
-  // Agrupar por time
-  const teams={};
-  Object.entries(S.slots).forEach(([k,s])=>{
-    if(!s.occupied)return;
-    const [dia]=k.split('|');
-    if(!teams[s.team]){teams[s.team]={team:s.team,resp:s.resp,cpf:s.cpf,tel:s.tel,addr:s.addr,obs:s.obs,createdAt:s.createdAt,slots:[]};}
-    teams[s.team].slots.push({key:k,dia,hr:k.split('|')[1],status:s.status});
-  });
-
-  let list=Object.values(teams);
-
-  // Busca
-  if(q)list=list.filter(t=>[t.team,t.resp,t.tel,t.cpf].some(v=>(v||'').toLowerCase().includes(q)));
-  // Filtro status
-  if(S.filt!=='todos')list=list.filter(t=>t.slots.some(s=>s.status===S.filt));
-  // Filtro dia
-  if(dayFil)list=list.filter(t=>t.slots.some(s=>s.dia===dayFil));
-
-  if(!list.length){el.innerHTML=`<div class="empty"><i class="fa-solid fa-futbol"></i><h3>Nenhum time encontrado</h3><p>Ajuste os filtros ou cadastre times na agenda.</p></div>`;return;}
-
-  el.innerHTML=list.map(t=>{
-    const inad=t.slots.some(s=>s.status==='nao_pago');
-    const badge=inad?`<span class="bdg-up"><i class="fa-solid fa-circle-exclamation"></i> Inadimplente</span>`:`<span class="bdg-pd"><i class="fa-solid fa-circle-check"></i> Em Dia</span>`;
-    const dt=t.createdAt?new Date(t.createdAt).toLocaleDateString('pt-BR'):'—';
-    const slots=t.slots.map(s=>{const h=HRS.find(x=>x.i===s.hr)||{f:''};return`<span class="sc ${s.status==='pago'?'pd':'up'}">${s.status==='pago'?'✅':'🔴'} ${s.dia.split('-')[0]} ${s.hr}</span>`;}).join('');
-    return`<div class="tc">
-      <div class="tc-head"><div><div class="tc-name">⚽ ${esc(t.team)}</div><div class="tc-resp"><i class="fa-solid fa-user" style="color:var(--gold);font-size:.75rem"></i> ${esc(t.resp)}</div></div>${badge}</div>
-      <div class="tc-info">
-        ${t.tel?`<span class="chip"><i class="fa-solid fa-phone"></i>${esc(t.tel)}</span>`:''}
-        ${t.cpf?`<span class="chip"><i class="fa-solid fa-id-card"></i>${esc(t.cpf)}</span>`:''}
-        ${t.addr?`<span class="chip"><i class="fa-solid fa-location-dot"></i>${esc(t.addr.substring(0,40))}${t.addr.length>40?'...':''}</span>`:''}
-        <span class="chip"><i class="fa-solid fa-calendar"></i>Desde ${dt}</span>
-      </div>
-      <div class="tc-slots">${slots}</div>
-      ${t.obs?`<p style="font-size:.8rem;color:var(--txt3);margin-top:8px;font-style:italic">💬 ${esc(t.obs)}</p>`:''}
-    </div>`;
-  }).join('');
+  const el=document.getElementById('times-list'); if (!el) return;
+  try {
+    let url='/api/times';
+    if (q) url+=`?busca=${encodeURIComponent(q)}`;
+    let times = await api('GET', url);
+    if (S.filt!=='todos') times=times.filter(t=>t.horarios.some(h=>h.status_pagamento===S.filt));
+    if (dayFil) times=times.filter(t=>t.horarios.some(h=>h.dia_semana===dayFil));
+    if (!times.length) { el.innerHTML='<div class="empty"><i class="fa-solid fa-futbol"></i><h3>Nenhum time encontrado</h3><p>Ajuste os filtros ou cadastre times na agenda.</p></div>'; return; }
+    el.innerHTML = times.map(t=>{
+      const inad=t.horarios.some(h=>h.status_pagamento==='nao_pago');
+      const badge=inad?'<span class="bdg-up"><i class="fa-solid fa-circle-exclamation"></i> Inadimplente</span>':'<span class="bdg-pd"><i class="fa-solid fa-circle-check"></i> Em Dia</span>';
+      const dt=t.data_cadastro?new Date(t.data_cadastro).toLocaleDateString('pt-BR'):'—';
+      const slots=t.horarios.map(h=>`<span class="sc ${h.status_pagamento==='pago'?'pd':'up'}">${h.status_pagamento==='pago'?'✅':'🔴'} ${h.dia_semana.split('-')[0]} ${h.horario_inicio}</span>`).join('');
+      return `<div class="tc">
+        <div class="tc-head"><div><div class="tc-name">⚽ ${esc(t.nome_time)}</div><div class="tc-resp"><i class="fa-solid fa-user" style="color:var(--gold);font-size:.75rem"></i> ${esc(t.nome_responsavel)}</div></div>${badge}</div>
+        <div class="tc-info">
+          ${t.telefone?`<span class="chip"><i class="fa-solid fa-phone"></i>${esc(t.telefone)}</span>`:''}
+          ${t.cpf?`<span class="chip"><i class="fa-solid fa-id-card"></i>${esc(t.cpf)}</span>`:''}
+          ${t.endereco?`<span class="chip"><i class="fa-solid fa-location-dot"></i>${esc(t.endereco.substring(0,40))}${t.endereco.length>40?'...':''}</span>`:''}
+          <span class="chip"><i class="fa-solid fa-calendar"></i>Desde ${dt}</span>
+        </div>
+        <div class="tc-slots">${slots}</div>
+        ${t.observacoes?`<p style="font-size:.8rem;color:var(--txt3);margin-top:8px;font-style:italic">💬 ${esc(t.observacoes)}</p>`:''}
+      </div>`;
+    }).join('');
+  } catch { toast('Erro ao carregar histórico','er'); }
 }
 
 // ── RELATÓRIO ─────────────────────────────────
-function gerarRpt(){
+async function gerarRpt() {
   const st=document.getElementById('rpt-st').value;
   const day=document.getElementById('rpt-day').value;
-  let data=[];
-  Object.entries(S.slots).forEach(([k,s])=>{
-    if(!s.occupied)return;
-    const [dia,hr]=k.split('|');
-    if(st&&s.status!==st)return;
-    if(day&&dia!==day)return;
-    const h=HRS.find(x=>x.i===hr)||{f:''};
-    data.push({team:s.team,resp:s.resp,tel:s.tel,cpf:s.cpf,dia,hr,hf:h.f,status:s.status});
-  });
-  // Ordenar por dia/horário
-  const dayOrd=DIAS.reduce((a,d,i)=>{a[d]=i;return a},{});
-  data.sort((a,b)=>dayOrd[a.dia]-dayOrd[b.dia]||a.hr.localeCompare(b.hr));
-  S.rptData=data;
-
-  const prev=document.getElementById('rpt-prev');prev.style.display='block';
-  const tbody=document.getElementById('rpt-tbody');
-  if(!data.length){tbody.innerHTML='<tr><td colspan="7" style="text-align:center;color:var(--txt3);padding:30px">Nenhum dado encontrado</td></tr>';document.getElementById('rpt-tot').textContent='';return;}
-  tbody.innerHTML=data.map(r=>`<tr><td>${esc(r.team)}</td><td>${esc(r.resp)}</td><td>${esc(r.tel||'—')}</td><td>${esc(r.cpf||'—')}</td><td>${esc(r.dia)}</td><td>${r.hr} – ${r.hf}</td><td><span class="${r.status==='pago'?'stb-pd':'stb-up'}">${r.status==='pago'?'✅ Pago':'🔴 Não Pago'}</span></td></tr>`).join('');
-  const pg=data.filter(r=>r.status==='pago').length;
-  document.getElementById('rpt-tot').innerHTML=`<strong>Total: ${data.length} registros</strong> &nbsp;|&nbsp; ✅ Pagos: ${pg} &nbsp;|&nbsp; 🔴 Não Pagos: ${data.length-pg}`;
-  toast(`${data.length} registros carregados`,'inf');
+  try {
+    let url='/api/relatorio';
+    const params=[];
+    if (st) params.push(`status=${encodeURIComponent(st)}`);
+    if (day) params.push(`dia=${encodeURIComponent(day)}`);
+    if (params.length) url+='?'+params.join('&');
+    S.rptData = await api('GET', url);
+    const prev=document.getElementById('rpt-prev'); prev.style.display='block';
+    const tbody=document.getElementById('rpt-tbody');
+    if (!S.rptData.length) { tbody.innerHTML='<tr><td colspan="7" style="text-align:center;color:var(--txt3);padding:30px">Nenhum dado encontrado</td></tr>'; document.getElementById('rpt-tot').textContent=''; return; }
+    tbody.innerHTML=S.rptData.map(r=>{
+      const hObj=HRS.find(x=>x.i===r.horario_inicio)||{f:''};
+      return `<tr><td>${esc(r.nome_time)}</td><td>${esc(r.nome_responsavel)}</td><td>${esc(r.telefone||'—')}</td><td>${esc(r.cpf||'—')}</td><td>${esc(r.dia_semana)}</td><td>${r.horario_inicio} – ${hObj.f}</td><td><span class="${r.status_pagamento==='pago'?'stb-pd':'stb-up'}">${r.status_pagamento==='pago'?'✅ Pago':'🔴 Não Pago'}</span></td></tr>`;
+    }).join('');
+    const pg=S.rptData.filter(r=>r.status_pagamento==='pago').length;
+    document.getElementById('rpt-tot').innerHTML=`<strong>Total: ${S.rptData.length} registros</strong> &nbsp;|&nbsp; ✅ Pagos: ${pg} &nbsp;|&nbsp; 🔴 Não Pagos: ${S.rptData.length-pg}`;
+    toast(`${S.rptData.length} registros carregados`,'inf');
+  } catch { toast('Erro ao gerar relatório','er'); }
 }
 
-function exportPDF(){
-  if(!S.rptData.length){toast('Carregue os dados primeiro!','er');return;}
+function exportPDF() {
+  if (!S.rptData.length) { toast('Carregue os dados primeiro!','er'); return; }
   const {jsPDF}=window.jspdf;
   const doc=new jsPDF({orientation:'landscape',unit:'mm',format:'a4'});
   doc.setFillColor(8,8,16);doc.rect(0,0,297,210,'F');
@@ -788,7 +835,7 @@ function exportPDF(){
   doc.setDrawColor(245,197,24);doc.setLineWidth(.5);doc.line(14,36,283,36);
   doc.autoTable({startY:42,
     head:[['Time','Responsável','Telefone','CPF','Dia','Horário','Status']],
-    body:S.rptData.map(r=>[r.team,r.resp,r.tel||'—',r.cpf||'—',r.dia,`${r.hr} – ${r.hf}`,r.status==='pago'?'PAGO':'NÃO PAGO']),
+    body:S.rptData.map(r=>{const hObj=HRS.find(x=>x.i===r.horario_inicio)||{f:''}; return[r.nome_time,r.nome_responsavel,r.telefone||'—',r.cpf||'—',r.dia_semana,`${r.horario_inicio} – ${hObj.f}`,r.status_pagamento==='pago'?'PAGO':'NÃO PAGO'];}),
     styles:{font:'helvetica',fontSize:9,fillColor:[13,13,26],textColor:[220,220,235],lineColor:[30,30,50],lineWidth:.3},
     headStyles:{fillColor:[30,30,50],textColor:[245,197,24],fontStyle:'bold'},
     alternateRowStyles:{fillColor:[18,18,30]},
@@ -800,38 +847,40 @@ function exportPDF(){
   toast('PDF exportado! 📄','ok');
 }
 
-function exportXLS(){
-  if(!S.rptData.length){toast('Carregue os dados primeiro!','er');return;}
-  const ws=XLSX.utils.json_to_sheet(S.rptData.map(r=>({'Time':r.team,'Responsável':r.resp,'Telefone':r.tel||'','CPF':r.cpf||'','Dia':r.dia,'Horário':`${r.hr} – ${r.hf}`,'Status':r.status==='pago'?'PAGO':'NÃO PAGO'})));
+function exportXLS() {
+  if (!S.rptData.length) { toast('Carregue os dados primeiro!','er'); return; }
+  const ws=XLSX.utils.json_to_sheet(S.rptData.map(r=>{const hObj=HRS.find(x=>x.i===r.horario_inicio)||{f:''}; return{'Time':r.nome_time,'Responsável':r.nome_responsavel,'Telefone':r.telefone||'','CPF':r.cpf||'','Dia da Semana':r.dia_semana,'Horário':`${r.horario_inicio} – ${hObj.f}`,'Status':r.status_pagamento==='pago'?'PAGO':'NÃO PAGO'};}));
   ws['!cols']=[{wch:25},{wch:25},{wch:18},{wch:18},{wch:18},{wch:18},{wch:14}];
-  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Horários');
+  const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'Horários');
   XLSX.writeFile(wb,`arena_resenha_relatorio_${new Date().toISOString().split('T')[0]}.xlsx`);
   toast('Excel exportado! 📊','ok');
 }
 
 // ── BACKUP ────────────────────────────────────
-function exportBackup(){
-  const bkp={exportado_em:new Date().toISOString(),sistema:'Arena Resenha - Gestão de Horários',slots:S.slots};
-  const blob=new Blob([JSON.stringify(bkp,null,2)],{type:'application/json'});
-  const url=URL.createObjectURL(blob),a=document.createElement('a');
-  a.href=url;a.download=`arena_resenha_backup_${new Date().toISOString().split('T')[0]}.json`;a.click();
-  URL.revokeObjectURL(url);toast('Backup exportado! 💾','ok');
+async function exportBackup() {
+  try {
+    const token=localStorage.getItem('arena_token');
+    const res=await fetch('/api/backup',{credentials:'include',headers:token?{'Authorization':'Bearer '+token}:{}});
+    if (!res.ok) { toast('Erro ao exportar backup','er'); return; }
+    const blob=await res.blob();
+    const url=URL.createObjectURL(blob), a=document.createElement('a');
+    a.href=url; a.download=`arena_resenha_backup_${new Date().toISOString().split('T')[0]}.json`; a.click();
+    URL.revokeObjectURL(url); toast('Backup exportado! 💾','ok');
+  } catch { toast('Erro ao exportar backup','er'); }
 }
 
-function importBackup(e){
-  const file=e.target.files[0];if(!file)return;
-  if(!confirm('⚠️ Restaurar backup irá SOBRESCREVER todos os dados atuais.\n\nContinuar?')){e.target.value='';return;}
-  const reader=new FileReader();
-  reader.onload=ev=>{
-    try{
-      const data=JSON.parse(ev.target.result);
-      if(!data.slots)throw new Error('Formato inválido');
-      S.slots=data.slots;saveSlots();renderAgenda();updateDash();
-      toast('Backup restaurado! ✅','ok');
-    }catch(err){toast('Arquivo inválido: '+err.message,'er');}
-    e.target.value='';
-  };
-  reader.readAsText(file);
+async function importBackup(e) {
+  const file=e.target.files[0]; if (!file) return;
+  if (!confirm('⚠️ Restaurar backup irá SOBRESCREVER todos os dados atuais.\n\nContinuar?')) { e.target.value=''; return; }
+  try {
+    const text=await file.text();
+    const data=JSON.parse(text);
+    if (!data.times||!data.horarios) throw new Error('Formato inválido');
+    await api('POST','/api/restaurar',data);
+    await loadHorarios(); renderAgenda(); await updateDash();
+    toast('Backup restaurado! ✅','ok');
+  } catch(err) { toast('Arquivo inválido: '+err.message,'er'); }
+  e.target.value='';
 }
 
 // ── MÁSCARAS ──────────────────────────────────
@@ -842,7 +891,7 @@ function mTel(i){let v=i.value.replace(/\D/g,'').substring(0,11);if(v.length<=10
 function toast(msg,type='ok'){
   const icons={ok:'fa-circle-check',er:'fa-circle-xmark',inf:'fa-circle-info'};
   const c=document.getElementById('toast-wrap');
-  const t=document.createElement('div');t.className=`toast ${type}`;
+  const t=document.createElement('div'); t.className=`toast ${type}`;
   t.innerHTML=`<i class="fa-solid ${icons[type]} t-ico"></i><span class="t-msg">${msg}</span>`;
   c.appendChild(t);
   setTimeout(()=>{t.classList.add('removing');setTimeout(()=>t.remove(),350);},3500);
@@ -852,6 +901,10 @@ function toast(msg,type='ok'){
 function esc(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();});
+
+checkAuth();
+
 </script>
 </body>
 </html>
+
