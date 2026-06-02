@@ -32,47 +32,95 @@ app.use(express.static(__dirname));
 // ─── Diagnóstico (remover depois de resolver) ───────────────────────────────
 app.get('/api/diagnostico', async (req, res) => {
   const resultado = {
-    env_url: supabaseUrl ? '✅ SUPABASE_URL definida (' + supabaseUrl.substring(0, 30) + '...)' : '❌ SUPABASE_URL NÃO DEFINIDA',
-    env_key: supabaseKey ? '✅ SUPABASE_KEY definida (' + supabaseKey.substring(0, 20) + '...)' : '❌ SUPABASE_KEY NÃO DEFINIDA',
-    env_jwt: JWT_SECRET ? '✅ JWT_SECRET definida' : '❌ JWT_SECRET NÃO DEFINIDA',
-    supabase_client: supabase ? '✅ Cliente Supabase criado' : '❌ Cliente Supabase NÃO criado',
-    teste_leitura: null,
-    teste_escrita: null,
-    teste_leitura_times: null
+    '1_env_url': supabaseUrl ? '✅ OK (' + supabaseUrl + ')' : '❌ NÃO DEFINIDA',
+    '2_env_key': supabaseKey ? '✅ OK (definida)' : '❌ NÃO DEFINIDA',
+    '3_supabase_client': supabase ? '✅ Criado' : '❌ NÃO criado',
+    '4_admin_existe': null,
+    '5_senha_admin_ok': null,
+    '6_jwt_funciona': null,
+    '7_cookie_recebido': req.cookies.token ? '✅ Cookie presente' : '❌ Nenhum cookie token recebido',
+    '8_auth_valida': null,
+    '9_total_horarios': null,
+    '10_total_times': null,
+    '11_teste_save_completo': null
   };
 
-  if (supabase) {
-    try {
-      const { data, error } = await supabase.from('horarios').select('id').limit(3);
-      resultado.teste_leitura = error ? '❌ ERRO: ' + JSON.stringify(error) : '✅ Leitura OK (' + (data ? data.length : 0) + ' registros)';
-    } catch (e) {
-      resultado.teste_leitura = '❌ EXCEÇÃO: ' + e.message;
-    }
+  if (!supabase) { return res.json(resultado); }
 
-    try {
-      const { data, error } = await supabase.from('times').select('id, nome_time').limit(3);
-      resultado.teste_leitura_times = error ? '❌ ERRO: ' + JSON.stringify(error) : '✅ Leitura Times OK (' + JSON.stringify(data) + ')';
-    } catch (e) {
-      resultado.teste_leitura_times = '❌ EXCEÇÃO: ' + e.message;
+  // Teste 4: Admin existe?
+  try {
+    const { data: admin, error } = await supabase.from('usuarios').select('*').eq('username', 'admin').single();
+    if (error) resultado['4_admin_existe'] = '❌ ERRO: ' + JSON.stringify(error);
+    else resultado['4_admin_existe'] = admin ? '✅ Admin encontrado (id=' + admin.id + ')' : '❌ Admin NÃO encontrado';
+    
+    // Teste 5: Senha funciona?
+    if (admin) {
+      const senhaOk = bcrypt.compareSync('admin123', admin.password);
+      resultado['5_senha_admin_ok'] = senhaOk ? '✅ Senha admin123 válida' : '❌ Senha admin123 NÃO corresponde';
     }
+  } catch (e) {
+    resultado['4_admin_existe'] = '❌ EXCEÇÃO: ' + e.message;
+  }
 
+  // Teste 6: JWT funciona?
+  try {
+    const token = jwt.sign({ id: 1, username: 'admin' }, JWT_SECRET, { expiresIn: '1h' });
+    const decoded = jwt.verify(token, JWT_SECRET);
+    resultado['6_jwt_funciona'] = decoded.username === 'admin' ? '✅ JWT sign+verify OK' : '❌ JWT falhou';
+  } catch (e) {
+    resultado['6_jwt_funciona'] = '❌ EXCEÇÃO: ' + e.message;
+  }
+
+  // Teste 8: Cookie/auth do usuário atual
+  if (req.cookies.token) {
     try {
-      // Tentar inserir e deletar um registro de teste
-      const { data: inserted, error: insertErr } = await supabase.from('times').insert([{
-        nome_time: '__TESTE_DIAGNOSTICO__',
-        nome_responsavel: 'teste'
-      }]).select('id').single();
-      
-      if (insertErr) {
-        resultado.teste_escrita = '❌ INSERT FALHOU: ' + JSON.stringify(insertErr);
-      } else {
-        // Limpar o registro de teste
-        await supabase.from('times').delete().eq('id', inserted.id);
-        resultado.teste_escrita = '✅ Escrita OK (insert + delete funcionaram)';
-      }
+      const decoded = jwt.verify(req.cookies.token, JWT_SECRET);
+      resultado['8_auth_valida'] = '✅ Logado como: ' + decoded.username;
     } catch (e) {
-      resultado.teste_escrita = '❌ EXCEÇÃO NA ESCRITA: ' + e.message;
+      resultado['8_auth_valida'] = '❌ Token inválido: ' + e.message;
     }
+  } else {
+    resultado['8_auth_valida'] = '⚠️ Sem cookie - usuário NÃO está logado (PUT vai dar 401)';
+  }
+
+  // Teste 9 e 10: Contagem
+  try {
+    const { data: h } = await supabase.from('horarios').select('id');
+    resultado['9_total_horarios'] = h ? '✅ ' + h.length + ' horários no banco' : '❌ Nenhum';
+    const { data: t } = await supabase.from('times').select('id');
+    resultado['10_total_times'] = t ? '✅ ' + t.length + ' times no banco' : '❌ Nenhum';
+  } catch (e) {
+    resultado['9_total_horarios'] = '❌ ' + e.message;
+  }
+
+  // Teste 11: Simular save completo (como o PUT faz)
+  try {
+    // Pegar um horário qualquer
+    const { data: horario } = await supabase.from('horarios').select('id, time_id').limit(1).single();
+    
+    // Criar time
+    const { data: newTime, error: insErr } = await supabase.from('times').insert([{
+      nome_time: '__TESTE_SAVE__', nome_responsavel: 'teste_resp', cpf: '', telefone: '', endereco: '', observacoes: ''
+    }]).select('id').single();
+    if (insErr) throw new Error('INSERT time: ' + JSON.stringify(insErr));
+
+    // Atualizar horário
+    const { error: updErr } = await supabase.from('horarios').update({
+      time_id: newTime.id, status_pagamento: 'nao_pago', updated_at: new Date().toISOString()
+    }).eq('id', horario.id);
+    if (updErr) throw new Error('UPDATE horario: ' + JSON.stringify(updErr));
+
+    // Ler de volta
+    const { data: check } = await supabase.from('horarios').select('*, times(*)').eq('id', horario.id).single();
+    const salvou = check && check.times && check.times.nome_time === '__TESTE_SAVE__';
+
+    // Limpar
+    await supabase.from('horarios').update({ time_id: horario.time_id, updated_at: new Date().toISOString() }).eq('id', horario.id);
+    await supabase.from('times').delete().eq('id', newTime.id);
+
+    resultado['11_teste_save_completo'] = salvou ? '✅ SAVE COMPLETO FUNCIONA (insert time + update horário + leitura OK)' : '❌ Save não persistiu';
+  } catch (e) {
+    resultado['11_teste_save_completo'] = '❌ FALHA: ' + e.message;
   }
 
   res.json(resultado);
