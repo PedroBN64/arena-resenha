@@ -29,101 +29,72 @@ app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 app.use(express.static(__dirname));
 
-// ─── Diagnóstico (remover depois de resolver) ───────────────────────────────
-app.get('/api/diagnostico', async (req, res) => {
-  const resultado = {
-    '1_env_url': supabaseUrl ? '✅ OK (' + supabaseUrl + ')' : '❌ NÃO DEFINIDA',
-    '2_env_key': supabaseKey ? '✅ OK (definida)' : '❌ NÃO DEFINIDA',
-    '3_supabase_client': supabase ? '✅ Criado' : '❌ NÃO criado',
-    '4_admin_existe': null,
-    '5_senha_admin_ok': null,
-    '6_jwt_funciona': null,
-    '7_cookie_recebido': req.cookies.token ? '✅ Cookie presente' : '❌ Nenhum cookie token recebido',
-    '8_auth_valida': null,
-    '9_total_horarios': null,
-    '10_total_times': null,
-    '11_teste_save_completo': null
-  };
+// ─── Teste definitivo (remover depois) ──────────────────────────────────────
+app.get('/api/teste-salvar', async (req, res) => {
+  if (!supabase) return res.json({ erro: 'Supabase não configurado' });
 
-  if (!supabase) { return res.json(resultado); }
-
-  // Teste 4: Admin existe?
+  const log = [];
   try {
-    const { data: admin, error } = await supabase.from('usuarios').select('*').eq('username', 'admin').single();
-    if (error) resultado['4_admin_existe'] = '❌ ERRO: ' + JSON.stringify(error);
-    else resultado['4_admin_existe'] = admin ? '✅ Admin encontrado (id=' + admin.id + ')' : '❌ Admin NÃO encontrado';
-    
-    // Teste 5: Senha funciona?
-    if (admin) {
-      const senhaOk = bcrypt.compareSync('admin123', admin.password);
-      resultado['5_senha_admin_ok'] = senhaOk ? '✅ Senha admin123 válida' : '❌ Senha admin123 NÃO corresponde';
-    }
-  } catch (e) {
-    resultado['4_admin_existe'] = '❌ EXCEÇÃO: ' + e.message;
+    // 1. Buscar um horário de Segunda-feira 18:00 que esteja livre
+    log.push('1. Buscando horário livre...');
+    const { data: horario, error: e1 } = await supabase
+      .from('horarios')
+      .select('*')
+      .eq('dia_semana', 'Segunda-feira')
+      .eq('horario_inicio', '18:00')
+      .single();
+    if (e1) { log.push('ERRO buscar horário: ' + JSON.stringify(e1)); return res.json({ log }); }
+    log.push('   Horário encontrado: id=' + horario.id + ', time_id=' + horario.time_id);
+
+    // 2. Criar um time de teste REAL (não será apagado)
+    log.push('2. Inserindo time "TESTE REAL" no Supabase...');
+    const { data: newTime, error: e2 } = await supabase
+      .from('times')
+      .insert([{ nome_time: 'TESTE REAL - ' + new Date().toLocaleString('pt-BR'), nome_responsavel: 'Pedro Teste', cpf: '000.000.000-00', telefone: '(00) 00000-0000', endereco: '', observacoes: 'Criado pelo endpoint de teste' }])
+      .select('*')
+      .single();
+    if (e2) { log.push('ERRO inserir time: ' + JSON.stringify(e2)); return res.json({ log }); }
+    log.push('   Time criado com sucesso! id=' + newTime.id + ', nome=' + newTime.nome_time);
+
+    // 3. Vincular o time ao horário
+    log.push('3. Atualizando horário id=' + horario.id + ' com time_id=' + newTime.id + '...');
+    const { error: e3 } = await supabase
+      .from('horarios')
+      .update({ time_id: newTime.id, status_pagamento: 'pago', updated_at: new Date().toISOString() })
+      .eq('id', horario.id);
+    if (e3) { log.push('ERRO atualizar horário: ' + JSON.stringify(e3)); return res.json({ log }); }
+    log.push('   Horário atualizado com sucesso!');
+
+    // 4. Ler de volta para confirmar
+    log.push('4. Lendo de volta para confirmar...');
+    const { data: check, error: e4 } = await supabase
+      .from('horarios')
+      .select('*, times(*)')
+      .eq('id', horario.id)
+      .single();
+    if (e4) { log.push('ERRO ler de volta: ' + JSON.stringify(e4)); return res.json({ log }); }
+
+    log.push('   RESULTADO FINAL:');
+    log.push('   - horario.id = ' + check.id);
+    log.push('   - horario.dia_semana = ' + check.dia_semana);
+    log.push('   - horario.time_id = ' + check.time_id);
+    log.push('   - horario.status_pagamento = ' + check.status_pagamento);
+    log.push('   - time.nome_time = ' + (check.times ? check.times.nome_time : 'NULL'));
+    log.push('   - time.nome_responsavel = ' + (check.times ? check.times.nome_responsavel : 'NULL'));
+
+    // 5. Contar total de times
+    const { data: allTimes } = await supabase.from('times').select('id, nome_time');
+    log.push('5. Total de times no banco: ' + (allTimes ? allTimes.length : 0));
+    if (allTimes) allTimes.forEach(t => log.push('   - id=' + t.id + ' → ' + t.nome_time));
+
+    log.push('');
+    log.push('✅ SUCESSO! Agora atualize a página principal (F5) e veja se o time "TESTE REAL" aparece no slot Segunda 18:00');
+
+    res.json({ sucesso: true, log });
+  } catch (err) {
+    log.push('❌ EXCEÇÃO: ' + err.message);
+    res.json({ sucesso: false, log });
   }
-
-  // Teste 6: JWT funciona?
-  try {
-    const token = jwt.sign({ id: 1, username: 'admin' }, JWT_SECRET, { expiresIn: '1h' });
-    const decoded = jwt.verify(token, JWT_SECRET);
-    resultado['6_jwt_funciona'] = decoded.username === 'admin' ? '✅ JWT sign+verify OK' : '❌ JWT falhou';
-  } catch (e) {
-    resultado['6_jwt_funciona'] = '❌ EXCEÇÃO: ' + e.message;
-  }
-
-  // Teste 8: Cookie/auth do usuário atual
-  if (req.cookies.token) {
-    try {
-      const decoded = jwt.verify(req.cookies.token, JWT_SECRET);
-      resultado['8_auth_valida'] = '✅ Logado como: ' + decoded.username;
-    } catch (e) {
-      resultado['8_auth_valida'] = '❌ Token inválido: ' + e.message;
-    }
-  } else {
-    resultado['8_auth_valida'] = '⚠️ Sem cookie - usuário NÃO está logado (PUT vai dar 401)';
-  }
-
-  // Teste 9 e 10: Contagem
-  try {
-    const { data: h } = await supabase.from('horarios').select('id');
-    resultado['9_total_horarios'] = h ? '✅ ' + h.length + ' horários no banco' : '❌ Nenhum';
-    const { data: t } = await supabase.from('times').select('id');
-    resultado['10_total_times'] = t ? '✅ ' + t.length + ' times no banco' : '❌ Nenhum';
-  } catch (e) {
-    resultado['9_total_horarios'] = '❌ ' + e.message;
-  }
-
-  // Teste 11: Simular save completo (como o PUT faz)
-  try {
-    // Pegar um horário qualquer
-    const { data: horario } = await supabase.from('horarios').select('id, time_id').limit(1).single();
-    
-    // Criar time
-    const { data: newTime, error: insErr } = await supabase.from('times').insert([{
-      nome_time: '__TESTE_SAVE__', nome_responsavel: 'teste_resp', cpf: '', telefone: '', endereco: '', observacoes: ''
-    }]).select('id').single();
-    if (insErr) throw new Error('INSERT time: ' + JSON.stringify(insErr));
-
-    // Atualizar horário
-    const { error: updErr } = await supabase.from('horarios').update({
-      time_id: newTime.id, status_pagamento: 'nao_pago', updated_at: new Date().toISOString()
-    }).eq('id', horario.id);
-    if (updErr) throw new Error('UPDATE horario: ' + JSON.stringify(updErr));
-
-    // Ler de volta
-    const { data: check } = await supabase.from('horarios').select('*, times(*)').eq('id', horario.id).single();
-    const salvou = check && check.times && check.times.nome_time === '__TESTE_SAVE__';
-
-    // Limpar
-    await supabase.from('horarios').update({ time_id: horario.time_id, updated_at: new Date().toISOString() }).eq('id', horario.id);
-    await supabase.from('times').delete().eq('id', newTime.id);
-
-    resultado['11_teste_save_completo'] = salvou ? '✅ SAVE COMPLETO FUNCIONA (insert time + update horário + leitura OK)' : '❌ Save não persistiu';
-  } catch (e) {
-    resultado['11_teste_save_completo'] = '❌ FALHA: ' + e.message;
-  }
-
-  res.json(resultado);
 });
 
 // Middleware de autenticação com JWT
@@ -272,6 +243,8 @@ app.get('/api/dashboard', async (req, res) => {
 });
 
 app.put('/api/horarios/:id', requireAuth, async (req, res) => {
+  if (!supabase) return res.status(500).json({ error: 'Supabase não configurado. Verifique as variáveis de ambiente na Vercel.' });
+
   const { id } = req.params;
   const { status_pagamento, nome_time, nome_responsavel, cpf, telefone, endereco, observacoes } = req.body;
 
@@ -303,6 +276,8 @@ app.put('/api/horarios/:id', requireAuth, async (req, res) => {
 });
 
 app.delete('/api/horarios/:id/liberar', requireAuth, async (req, res) => {
+  if (!supabase) return res.status(500).json({ error: 'Supabase não configurado.' });
+
   const { id } = req.params;
   try {
     const { error } = await supabase.from('horarios').update({ time_id: null, status_pagamento: 'nao_pago', updated_at: new Date().toISOString() }).eq('id', id);
@@ -358,6 +333,8 @@ app.get('/api/relatorio', async (req, res) => {
 
 // ─── Backup ───────────────────────────────────────────────────────────────────
 app.get('/api/backup', requireAuth, async (req, res) => {
+  if (!supabase) return res.status(500).json({ error: 'Supabase não configurado.' });
+
   try {
     const { data: times } = await supabase.from('times').select('*');
     const { data: horarios } = await supabase.from('horarios').select('*');
