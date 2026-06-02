@@ -287,7 +287,11 @@ app.get('/', (req, res) => {
 });
 
 // ─── Iniciar Servidor ─────────────────────────────────────────────────────────
-app.listen(PORT, () => {
-  console.log(`\n🏟️  Arena Resenha - Servidor Vercel-ready`);
-  console.log(`🚀 Rodando em: http://localhost:${PORT}\n`);
-});
+if (process.env.NODE_ENV !== 'production') {
+  app.listen(PORT, () => {
+    console.log(`\n🏟️  Arena Resenha - Servidor Vercel-ready`);
+    console.log(`🚀 Rodando em: http://localhost:${PORT}\n`);
+  });
+}
+
+module.exports = app;
